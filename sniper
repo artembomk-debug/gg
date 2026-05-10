@@ -1,0 +1,130 @@
+WITH AccountMetrics AS (
+    -- 1. Метрики, пов'язані з акаунтами (дата створення)
+    SELECT
+        DATE_TRUNC(s.date, DAY) AS date,  -- ВИПРАВЛЕНО
+        sp.country,
+        a.send_interval,
+        a.is_verified,
+        a.is_unsubscribed,
+        COUNT(a.id) AS account_cnt,
+        0 AS sent_msg,
+        0 AS open_msg,
+        0 AS visit_msg,
+
+
+
+
+    FROM
+        DA.account a
+        join `DA.account_session` acs ON a.id = acs.account_id
+        join `DA.session` s ON s.ga_session_id = acs.ga_session_id
+        join `DA.session_params` sp on sp.ga_session_id = acs.ga_session_id  
+       
+    GROUP BY 1, 2, 3, 4, 5
+),
+
+
+
+
+EmailMetrics AS (
+    -- 2. Метрики, пов'язані з емейлами (дата відправки)
+    SELECT
+        date_add(s.date, INTERVAL es.sent_date DAY) as sent_date,  -- ВИПРАВЛЕНО
+        sp.country,
+        a.send_interval,
+        a.is_verified,
+        a.is_unsubscribed,
+        0 AS account_cnt,
+        count(es.id_message) AS sent_msg,
+       count(eo.id_message) AS open_msg,
+       count(e.id_message) AS visit_msg
+    FROM
+       `DA.email_sent` es
+       join DA.account a
+       on es.id_account = a.id
+        join `DA.account_session` acs ON a.id = acs.account_id
+        join `DA.session` s ON s.ga_session_id = acs.ga_session_id
+        join `DA.session_params` sp on sp.ga_session_id = acs.ga_session_id
+     
+        left join `DA.email_open` eo on eo.id_account = a.id
+       left join `DA.email_visit` e on  e.id_account = a.id
+     
+ 
+    GROUP BY 1, 2, 3, 4, 5
+),
+
+
+
+
+CombinedMetrics AS (
+    -- 3. Об'єднання метрик акаунтів та емейлів
+    SELECT * FROM AccountMetrics
+    UNION ALL
+    SELECT * FROM EmailMetrics
+),
+sum as ( select
+sum(CombinedMetrics.sent_msg) as sent_msg ,
+sum(CombinedMetrics.open_msg) as open_msg,
+sum(CombinedMetrics.visit_msg)as visit_msg
+from CombinedMetrics
+
+
+
+
+
+
+
+
+ ),
+
+
+
+
+CountryAggregates AS (
+    -- 4. Розрахунок підсумкових значень по країні
+    SELECT
+        cm.*,
+        -- Підсумкові значення по країні для ранжування
+        SUM(cm.account_cnt) OVER (PARTITION BY cm.country) AS total_country_account_cnt,
+        SUM(cm.sent_msg) OVER (PARTITION BY cm.country) AS total_country_sent_cnt
+    FROM CombinedMetrics cm
+),
+
+
+
+
+RankedMetrics AS (
+    -- 5. Розрахунок рангу (Виносимо RANK() сюди, щоб можна було фільтрувати)
+    SELECT
+        ca.*,
+        RANK() OVER (ORDER BY ca.total_country_account_cnt DESC) AS rank_total_country_account_cnt,
+        RANK() OVER (ORDER BY ca.total_country_sent_cnt DESC) AS rank_total_country_sent_cnt
+    FROM
+        CountryAggregates ca
+)
+
+
+
+
+-- 6. Фінальний запит: Виведення результатів та ФІЛЬТРАЦІЯ
+SELECT
+    date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    account_cnt,
+    sent_msg,
+    open_msg,
+    visit_msg,
+    total_country_account_cnt,
+    total_country_sent_cnt,
+    rank_total_country_account_cnt,
+    rank_total_country_sent_cnt
+FROM
+    RankedMetrics
+-- Фільтрація тепер працює, оскільки rank_* є звичайними стовпцями з CTE RankedMetrics
+WHERE
+    rank_total_country_account_cnt <= 10
+    OR
+    rank_total_country_sent_cnt <= 10;
